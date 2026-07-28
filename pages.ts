@@ -1,18 +1,20 @@
 /**
- * Count anime shows by protagonist gender using the AniList GraphQL API.
+ * Page-based version of the anime protagonist gender counter.
  *
- * Saves progress to results.json with totals at the top and a full show list.
+ * Uses offset-based pagination (page numbers). AniList caps this at 5,000
+ * entries, so this version can only scan the top 5,000 most popular anime.
+ * For scanning all anime, use index.ts (cursor-based) instead.
  *
  * Usage:
- *   bun run index.ts                  # default: scans all anime
- *   bun run index.ts --pages=100      # custom page count
- *   bun run index.ts --per-page=50    # entries per page (max 50 for AniList)
+ *   bun run pages.ts                  # default: 100 pages (~5000 entries max)
+ *   bun run pages.ts --pages=100      # custom page count
+ *   bun run pages.ts --per-page=50    # entries per page (max 50 for AniList)
  */
 
 import { writeFileSync } from "node:fs";
 
 const ANILIST_ENDPOINT = "https://graphql.anilist.co";
-const OUTPUT_FILE = "results.json";
+const OUTPUT_FILE = "results_pages.json";
 
 type CharacterNode = {
   id: number;
@@ -57,10 +59,10 @@ type PageResponse = {
 };
 
 const query = `
-query ($perPage: Int, $idGreater: Int) {
-  Page(perPage: $perPage) {
+query ($page: Int, $perPage: Int) {
+  Page(page: $page, perPage: $perPage) {
     pageInfo { hasNextPage currentPage }
-    media(type: ANIME, sort: ID, id_greater: $idGreater) {
+    media(type: ANIME, sort: POPULARITY_DESC) {
       id
       title { romaji english }
       characters(role: MAIN) {
@@ -75,28 +77,32 @@ query ($perPage: Int, $idGreater: Int) {
 }
 `;
 
-function parseArgs(argv: string[]): { perPage: number } {
-  const args: { perPage: number } = { perPage: 50 };
+function parseArgs(argv: string[]): { pages: number; perPage: number } {
+  const args: { pages: number; perPage: number } = {
+    pages: 100,
+    perPage: 50,
+  };
   for (const arg of argv.slice(2)) {
     const m = /^--([a-z-]+)=(.+)$/.exec(arg);
     if (!m) continue;
     const [, key, value] = m;
+    if (key === "pages") args.pages = Number(value);
     if (key === "per-page") args.perPage = Math.min(Number(value), 50);
   }
   return args;
 }
 
-async function fetchPage(perPage: number, idGreater: number, attempt = 0): Promise<PageResponse> {
+async function fetchPage(page: number, perPage: number, attempt = 0): Promise<PageResponse> {
   const res = await fetch(ANILIST_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ query, variables: { perPage, idGreater } }),
+    body: JSON.stringify({ query, variables: { page, perPage } }),
   });
   if (res.status === 429) {
     const wait = Math.min(5000 * Math.pow(2, attempt), 60000);
     console.error(`Rate limited (429), waiting ${wait / 1000}s (attempt ${attempt + 1})...`);
     await Bun.sleep(wait);
-    return fetchPage(perPage, idGreater, attempt + 1);
+    return fetchPage(page, perPage, attempt + 1);
   }
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -152,18 +158,12 @@ function saveResults(counts: Record<string, number>, shows: ShowEntry[]) {
 }
 
 async function main() {
-  const { perPage } = parseArgs(process.argv);
+  const { pages, perPage } = parseArgs(process.argv);
   const counts = { female: 0, male: 0, mixed: 0, other: 0, none: 0 };
   const shows: ShowEntry[] = [];
-  let idGreater = 0;
-  let page = 1;
 
-  while (true) {
-    const data = await fetchPage(perPage, idGreater);
-    if (data.Page.media.length === 0) {
-      console.log("No more entries available.");
-      break;
-    }
+  for (let page = 1; page <= pages; page++) {
+    const data = await fetchPage(page, perPage);
     for (const media of data.Page.media) {
       const { classification, protagonists } = classifyShow(media);
       counts[classification]++;
@@ -173,14 +173,16 @@ async function main() {
         protagonists,
         classification,
       });
-      idGreater = media.id;
     }
     console.log(
-      `Page ${page} done (total ${shows.length}) — ` +
+      `Page ${page}/${pages} done (total ${shows.length}) — ` +
         `female: ${counts.female}, male: ${counts.male}, mixed: ${counts.mixed}, femaleCombined: ${counts.female + counts.mixed}, maleCombined: ${counts.male + counts.mixed}, other: ${counts.other}, none: ${counts.none}`,
     );
     saveResults(counts, shows);
-    page++;
+    if (!data.Page.pageInfo.hasNextPage) {
+      console.log("No more pages available.");
+      break;
+    }
     await Bun.sleep(1000);
   }
 
