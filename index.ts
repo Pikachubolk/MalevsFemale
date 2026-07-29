@@ -5,8 +5,7 @@
  *
  * Usage:
  *   bun run index.ts                  # default: scans all anime
- *   bun run index.ts --pages=100      # custom page count
- *   bun run index.ts --per-page=50    # entries per page (max 50 for AniList)
+ *   bun run index.ts --per-page=50    # entries per request (max 50 for AniList)
  */
 
 import { writeFileSync } from "node:fs";
